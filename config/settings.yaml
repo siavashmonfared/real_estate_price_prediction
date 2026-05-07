@@ -1,0 +1,38 @@
+geocoding:
+  primary: census
+  fallback: nominatim
+  nominatim_user_agent: "housing-estimator/0.1.0"
+
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  models_dir: "data/models"
+
+model:
+  n_estimators: 500
+  max_depth: 6
+  learning_rate: 0.05
+  test_size: 0.2
+  random_state: 42
+  quantile_low: 0.10
+  quantile_high: 0.90
+
+comps:
+  radii_miles: [0.5, 1.0, 2.0, 5.0]
+  min_comps: 3
+  max_comps: 10
+  weights:
+    sqft: 0.30
+    bed_bath: 0.20
+    age: 0.15
+    property_type: 0.15
+    recency: 0.20
+
+blending:
+  high_comp_threshold: 5
+  mid_comp_threshold: 3
+  weights:
+    high_comp: [0.60, 0.40]   # comp, ml
+    mid_comp: [0.40, 0.60]
+    low_comp: [0.20, 0.80]
+    no_comp: [0.00, 1.00]
