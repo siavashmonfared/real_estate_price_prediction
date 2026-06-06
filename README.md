@@ -1,147 +1,126 @@
 # Real Estate Price Prediction
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 Residential property price estimation using machine learning, geocoding, public market data, and comparable-sales analysis.
 
-This project packages a command-line estimator named `housing-estimate`. It can:
+Two complementary approaches are combined:
 
-- Estimate a residential property price from an address and property attributes.
-- Geocode addresses through the US Census geocoder with a Nominatim fallback.
-- Attempt property-detail lookup from public Zillow pages when available.
-- Fetch recent sold-property data near a target address from Redfin public endpoints.
-- Train a local XGBoost model on nearby sales and report transparent diagnostics.
-- Use pre-trained XGBoost models plus comparable-sales blending for a broader estimate.
-- Render console reports with model performance, feature importances, estimate ranges, and closest comps.
+- **Global model** — XGBoost trained on historical multi-city sales, enriched with FHFA House Price Index, Redfin ZIP-level market data, and Census ACS income. Good for a quick broad estimate.
+- **Local model** — XGBoost trained *on demand* from Redfin sold listings within a user-specified radius of the subject property. Better for neighborhood-specific valuation. Reports full train/validation/test diagnostics so you know how much to trust the number.
 
-The examples below use the public MIT main address, `77 Massachusetts Ave, Cambridge, MA 02139`, as a non-private demonstration address. For real residential use, replace the example address and property facts with verified subject-property information.
+The two estimates are blended based on the number of comparable sales found: more comps → higher comp weight, fewer comps → fall back to the global model.
+
+All examples use the public institutional address `77 Massachusetts Ave, Cambridge, MA 02139`. For real use, replace the example address and property facts with verified subject-property information.
+
+---
+
+## Architecture
+
+```
+housing-estimate price / local-estimate / recent-sales
+        │
+        ├── geocoder/          Census geocoder → Nominatim fallback
+        ├── datasources/       Zillow (property lookup), Redfin (recent sales),
+        │                      FHFA HPI, Census ACS income, Redfin ZIP data
+        ├── features/          PropertyFeatures schema + engineering transforms
+        ├── models/
+        │   ├── train.py       Global XGBoost training pipeline
+        │   ├── predict.py     Global model inference
+        │   └── local_model.py On-demand local model (train → validate → predict)
+        ├── comps/             Comparable-sales engine (similarity scoring + price adjustment)
+        └── estimator.py       Orchestration: geocode → enrich → ML → comps → blend
+```
+
+---
 
 ## Repository Layout
 
 ```text
 .
 ├── config/
-│   └── settings.yaml                 # Data paths, model settings, comp weights
+│   └── settings.yaml                 # Data paths, model hyperparameters, comp weights
 ├── data/
-│   ├── models/                       # Pre-trained XGBoost model artifacts
-│   ├── processed/                    # Processed comparable-sales training data
-│   └── raw/                          # Small raw support datasets
+│   ├── models/                       # Pre-trained XGBoost artifacts (joblib)
+│   ├── processed/                    # Processed comp training data (parquet)
+│   └── raw/                          # Small reference datasets (kc_house_data.csv)
 ├── scripts/
-│   ├── download_training_data.py     # Downloads sample training data
-│   ├── download_market_data.py       # Downloads optional market context data
-│   └── estimate_public_example.py    # Safe public-address example script
+│   ├── download_training_data.py     # Download King County & Ames training data
+│   ├── download_market_data.py       # Download FHFA HPI, Redfin market data
+│   ├── estimate_public_example.py    # CLI usage example (public address)
+│   └── generate_report.py            # Generate a PDF valuation report via pdflatex
 ├── src/housing_estimator/
-│   ├── cli.py                        # Typer CLI entrypoint
+│   ├── cli.py                        # Typer CLI (price, local-estimate, recent-sales, train, setup)
+│   ├── config.py                     # Pydantic settings loader
 │   ├── estimator.py                  # Main orchestration pipeline
-│   ├── comps/                        # Comparable-sales engine
+│   ├── output.py                     # Rich console rendering
+│   ├── comps/engine.py               # Comparable-sales engine
 │   ├── datasources/                  # Zillow, Redfin, FHFA, Census ACS loaders
-│   ├── features/                     # Property schema and feature engineering
+│   ├── features/
+│   │   ├── property.py               # PropertyFeatures schema, PropertyType, Condition
+│   │   └── engineering.py            # Feature engineering transforms
 │   ├── geocoder/                     # Census and Nominatim geocoders
-│   └── models/                       # Training, prediction, and local model logic
+│   └── models/
+│       ├── train.py                  # Global XGBoost training pipeline
+│       ├── predict.py                # Global model inference
+│       └── local_model.py            # On-demand local model
 └── tests/                            # Unit tests with mocked network calls
 ```
 
-## What Is Included
-
-The repository includes code, tests, config, pre-trained model artifacts, and small data assets needed for normal use:
-
-- `data/models/xgb_point.joblib`
-- `data/models/xgb_low.joblib`
-- `data/models/xgb_high.joblib`
-- `data/models/feature_columns.joblib`
-- `data/processed/training_data_for_comps.parquet`
-- `data/raw/kc_house_data.csv`
-
-Large or region-specific raw market files are intentionally excluded and can be regenerated locally:
-
-- `data/raw/redfin_zip_raw.tsv.gz`
-- `data/raw/redfin_zip_market_data.csv`
-- `data/raw/fhfa_hpi.csv`
-- `data/raw/fhfa_hpi_zip5.xlsx`
-
-Run `housing-estimate setup` or `python scripts/download_market_data.py` if you want those optional market-context files.
+---
 
 ## Requirements
 
 - Python 3.10 or newer
-- Network access for live geocoding and Redfin recent-sales fetches
-- A working Python virtual environment
+- Network access for live geocoding, Redfin recent-sales fetches, and optional Zillow lookup
+- `pdflatex` (TeX Live or MacTeX) if you want to generate PDF reports via `generate_report.py`
 
-Core dependencies are declared in `pyproject.toml`, including:
+Core dependencies are declared in `pyproject.toml`:
 
-- `typer`
-- `click`
-- `rich`
-- `httpx`
-- `pydantic`
-- `xgboost`
-- `scikit-learn`
-- `pandas`
-- `numpy`
-- `geopy`
-- `joblib`
-- `pyarrow`
-- `pyyaml`
+| Package | Purpose |
+|---|---|
+| `typer` + `click` | CLI |
+| `rich` | Console rendering |
+| `httpx` | HTTP client for geocoding and Redfin |
+| `pydantic` + `pydantic-settings` | Config and schema validation |
+| `xgboost` | Gradient-boosted tree models |
+| `scikit-learn` | Train/test split, cross-validation |
+| `pandas` + `numpy` + `pyarrow` | Data manipulation |
+| `geopy` | Haversine distance |
+| `joblib` | Model serialization |
+| `pyyaml` | Config file loading |
+
+---
 
 ## Installation
-
-Clone the repository:
 
 ```bash
 git clone https://github.com/siavashmonfared/real_estate_price_prediction.git
 cd real_estate_price_prediction
-```
-
-Create and activate a virtual environment:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Install the package in editable mode:
-
-```bash
 pip install --upgrade pip
 pip install -e .
 ```
 
-For development and tests:
-
-```bash
-pip install -e ".[dev]"
-```
-
-Confirm the CLI is installed:
+Verify:
 
 ```bash
 housing-estimate --help
 ```
 
+---
+
 ## Quick Start
 
-### Standard estimate
+### One-command estimate
 
 ```bash
 housing-estimate price "77 Massachusetts Ave, Cambridge, MA 02139" --manual
 ```
 
-The `price` command:
-
-1. Optionally tries to look up public property details.
-2. Prompts for property details when `--manual` is used or lookup fails.
-3. Geocodes the address.
-4. Adds available market context.
-5. Runs the pre-trained XGBoost model.
-6. Finds comparable sales from the processed comp dataset.
-7. Blends ML and comp estimates.
-
-Manual mode prompts for:
-
-- Bedrooms
-- Bathrooms
-- Square footage
-- Lot square footage
-- Year built
-- Property type
+The `price` command geocodes the address, optionally looks up public property details, prompts for property attributes, runs the pre-trained XGBoost model, finds comparable sales, and blends the estimates.
 
 ### Local model from recent nearby sales
 
@@ -149,16 +128,7 @@ Manual mode prompts for:
 housing-estimate local-estimate "77 Massachusetts Ave, Cambridge, MA 02139" --manual
 ```
 
-The `local-estimate` command:
-
-1. Geocodes the address.
-2. Gets or prompts for property details.
-3. Fetches nearby Redfin sold listings.
-4. Expands radius/lookback until enough training sales are found.
-5. Trains an XGBoost model on local sales.
-6. Reports train, validation, test, and cross-validation metrics.
-7. Retrains on all local data and predicts the subject property.
-8. Prints the closest comparable sales.
+Fetches Redfin sold listings near the address, trains an XGBoost model on them, and prints full model diagnostics alongside the estimate. Better for neighborhood-specific valuations.
 
 ### Recent sales lookup
 
@@ -166,27 +136,37 @@ The `local-estimate` command:
 housing-estimate recent-sales "77 Massachusetts Ave, Cambridge, MA 02139" --radius 1.0 --days 365
 ```
 
-This geocodes the address and fetches recently sold Redfin properties in the requested radius and lookback window.
+Geocodes the address and returns a formatted table of recently sold properties.
 
-## Example Script
+---
 
-Run the safe public-address example:
+## CLI Reference
 
-```bash
-python scripts/estimate_public_example.py
+```
+housing-estimate --help
+
+Commands:
+  setup           Download training data and market data files
+  train           Train the global XGBoost price estimation model
+  price           Estimate price using the global model + comparable sales
+  local-estimate  Estimate price using a model trained on local recent sales
+  recent-sales    Find recently sold properties near an address
 ```
 
-The script uses `77 Massachusetts Ave, Cambridge, MA 02139` only as a public geocoding anchor and uses illustrative residential inputs. For a real estimate:
+Key options:
 
-1. Copy `scripts/estimate_public_example.py`.
-2. Change `ADDRESS`.
-3. Replace `PropertyFeatures` with verified subject-property facts.
-4. Adjust search radius, lookback, or target sales count if needed.
-5. Run the copied script from the repo root.
+| Command | Option | Description |
+|---|---|---|
+| `price` | `--manual` / `-m` | Skip Zillow lookup, enter property details manually |
+| `local-estimate` | `--manual` / `-m` | Skip Zillow lookup |
+| `recent-sales` | `--days` / `-d` | Days to look back (default: 90) |
+| `recent-sales` | `--radius` / `-r` | Search radius in miles (default: 1.0) |
+
+---
 
 ## Programmatic Usage
 
-### Standard model estimate
+### Global model estimate
 
 ```python
 from housing_estimator.estimator import estimate_price
@@ -195,109 +175,175 @@ from housing_estimator.features.property import PropertyFeatures, PropertyType
 features = PropertyFeatures(
     bedrooms=3,
     bathrooms=2.0,
-    sqft=1500,
-    lot_sqft=5000,
+    sqft=1_500,
+    lot_sqft=5_000,
     year_built=1990,
     property_type=PropertyType.SINGLE_FAMILY,
 )
 
 result = estimate_price("77 Massachusetts Ave, Cambridge, MA 02139", features)
-
-print(result.blended_estimate)
-print(result.blended_low, result.blended_high)
+print(f"${result.blended_estimate:,.0f}")
+print(f"Range: ${result.blended_low:,.0f} — ${result.blended_high:,.0f}")
 ```
 
-### Local model estimate from Redfin sales
+### Local model from Redfin sales
 
 ```python
 from housing_estimator.datasources.recent_sales import fetch_recent_sales_redfin
-from housing_estimator.features.property import PropertyFeatures, PropertyType
+from housing_estimator.features.property import Condition, PropertyFeatures, PropertyType
 from housing_estimator.models.local_model import train_and_predict
 
-lat = 42.359244
-lon = -71.093139
+lat, lon = 42.359244, -71.093139
 
 features = PropertyFeatures(
-    bedrooms=3,
-    bathrooms=2.0,
-    sqft=1500,
-    lot_sqft=5000,
-    year_built=1990,
-    property_type=PropertyType.SINGLE_FAMILY,
+    bedrooms=5,
+    bathrooms=3.0,
+    sqft=1_995,
+    lot_sqft=2_160,
+    year_built=1894,
+    condition=Condition.RENOVATED,       # transparent appraiser-style adjustment
+    property_type=PropertyType.MULTI_FAMILY,
     latitude=lat,
     longitude=lon,
     zip_code="02139",
 )
 
 sales = fetch_recent_sales_redfin(lat, lon, radius_miles=1.0, days_back=365)
-valid_sales = [s for s in sales if s.sqft and s.sqft > 0 and s.price > 0]
+valid = [s for s in sales if s.sqft and s.sqft > 0 and s.price > 0]
 
-estimate = train_and_predict(
-    features,
-    valid_sales,
-    search_radius=1.0,
-    search_days=365,
-)
+estimate = train_and_predict(features, valid, search_radius=1.0, search_days=365)
 
-print(estimate.point_estimate)
-print(estimate.low, estimate.high)
+print(f"${estimate.point_estimate:,.0f}")
+print(f"Range: ${estimate.low:,.0f} — ${estimate.high:,.0f}")
+print(f"Test R²: {estimate.test_metrics.r2:.3f}  MAPE: {estimate.test_metrics.mape:.1%}")
 ```
+
+---
+
+## Property Schema
+
+`PropertyFeatures` (in `features/property.py`) captures all subject-property attributes:
+
+| Field | Type | Description |
+|---|---|---|
+| `bedrooms` | `int` | Bedroom count |
+| `bathrooms` | `float` | Bathroom count (0.5 = half bath) |
+| `sqft` | `float` | Finished living area |
+| `lot_sqft` | `float \| None` | Lot size |
+| `year_built` | `int` | Original construction year |
+| `renovation_year` | `int \| None` | If set, drives effective age instead of year_built |
+| `condition` | `Condition` | `renovated` / `updated` / `average` / `dated` |
+| `stories` | `float \| None` | Number of stories |
+| `property_type` | `PropertyType` | `single_family` / `condo` / `townhouse` / `multi_family` / `other` |
+
+The `Condition` field applies a transparent, appraiser-style multiplier to the final estimate:
+
+| Condition | Multiplier | Use when |
+|---|---|---|
+| `RENOVATED` | ×1.08 | Recent gut renovation |
+| `UPDATED` | ×1.03 | Partially updated, good shape |
+| `AVERAGE` | ×1.00 | Typical for its age (default) |
+| `DATED` | ×0.88 | Original/needs work |
+
+---
+
+## PDF Valuation Report
+
+`scripts/generate_report.py` generates a formatted PDF with:
+
+- Subject property details
+- Estimated price range
+- Model configuration and train/validation/test metrics
+- Tables of nearest and most-recently sold properties
+- Full comparable-sales dataset (CSV export)
+
+Edit the constants near the top of `main()` to set the address, features, and search parameters:
+
+```python
+ADDRESS = "77 Massachusetts Ave, Cambridge, MA 02139"
+SLUG = "example_report"              # output filename prefix
+FEATURES = dict(bedrooms=3, bathrooms=2.0, sqft=1_500, year_built=1950, ...)
+SEARCH_RADIUS_MILES = 0.5
+SEARCH_DAYS_BACK = 365
+```
+
+Run:
+
+```bash
+python scripts/generate_report.py
+```
+
+Output:
+
+```
+reports/example_report.pdf
+reports/example_report_data.csv
+```
+
+Requires `pdflatex` (TeX Live or MacTeX). The `reports/` directory is in `.gitignore`.
+
+---
 
 ## Data Pipeline
 
-### Download data
+### Download and train
 
 ```bash
-housing-estimate setup
+housing-estimate setup    # downloads training and market data
+housing-estimate train    # trains and saves model artifacts
 ```
 
-This runs:
+Training sources:
 
-```bash
-python scripts/download_training_data.py
-python scripts/download_market_data.py
+| Dataset | Description |
+|---|---|
+| King County, WA (2014–2015) | ~21k residential sales with GPS coordinates |
+| Ames, IA | Classic ML benchmark (~3k sales, when available) |
+| FHFA HPI | Used to inflation-adjust historical prices to current dollars |
+| Redfin ZIP data | ZIP-level median price/sqft for market context |
+| Census ACS | ZIP-level median household income |
+
+After training, the pipeline writes:
+
+```text
+data/models/xgb_point.joblib          # point-estimate model
+data/models/xgb_low.joblib            # 10th-percentile quantile model
+data/models/xgb_high.joblib           # 90th-percentile quantile model
+data/models/feature_columns.joblib    # expected feature column order
+data/processed/training_data_for_comps.parquet
 ```
 
-The setup step can download:
+### Blending logic
 
-- Sample historical home-sales training data
-- FHFA HPI data
-- Redfin ZIP-level market data
-- A large Redfin raw ZIP archive, when available
+The `estimator.py` orchestrator blends the ML estimate with the comparable-sales engine based on how many comps were found:
 
-Large generated raw data files are ignored by Git.
+| Comps found | Comp weight | ML weight |
+|---|---|---|
+| ≥ 5 | 60% | 40% |
+| 3–4 | 40% | 60% |
+| 1–2 | 20% | 80% |
+| 0 | 0% | 100% |
 
-### Train the global model
+These thresholds are configurable in `config/settings.yaml`.
 
-```bash
-housing-estimate train
-```
-
-Training reads `data/raw/kc_house_data.csv`, engineers features, and writes:
-
-- `data/models/xgb_point.joblib`
-- `data/models/xgb_low.joblib`
-- `data/models/xgb_high.joblib`
-- `data/models/feature_columns.joblib`
-- `data/processed/training_data_for_comps.parquet`
-
-The point model predicts expected sale price. The low/high models provide an approximate 10th/90th percentile range.
+---
 
 ## Configuration
 
-Primary settings live in `config/settings.yaml`.
-
-Important sections:
-
-- `data`: paths for raw data, processed data, and model artifacts
-- `model`: global XGBoost training parameters
-- `comps`: comparable-sale search radii, count limits, and similarity weights
-- `blending`: how strongly to weight comps vs. ML based on comp count
-- `geocoding`: Census primary geocoder and Nominatim fallback
-
-Example comp weights:
+`config/settings.yaml` controls all major parameters:
 
 ```yaml
+geocoding:
+  primary: census
+  fallback: nominatim
+
+model:
+  n_estimators: 500
+  max_depth: 6
+  learning_rate: 0.05
+  quantile_low: 0.10
+  quantile_high: 0.90
+
 comps:
   radii_miles: [0.5, 1.0, 2.0, 5.0]
   min_comps: 3
@@ -308,137 +354,77 @@ comps:
     age: 0.15
     property_type: 0.15
     recency: 0.20
+
+blending:
+  high_comp_threshold: 5
+  mid_comp_threshold: 3
+  weights:
+    high_comp: [0.60, 0.40]   # [comp, ml]
+    mid_comp: [0.40, 0.60]
+    low_comp: [0.20, 0.80]
+    no_comp: [0.00, 1.00]
 ```
 
-## Model Notes
-
-### Global model
-
-The global model is trained from historical housing data and engineered features. It is useful for a quick broad estimate, especially when paired with the comparable-sales engine.
-
-### Local model
-
-The local model is trained on Redfin sold listings around a specific subject property. It is usually better for neighborhood-specific valuation because it uses current nearby sales, but it depends on the availability and quality of recent sold listings.
-
-Local model features:
-
-- Square footage
-- Log square footage
-- Bedrooms
-- Bathrooms
-- Age
-- Lot square footage
-- Distance from subject property
-- Neighborhood median price per square foot
-
-The local model prints:
-
-- Train/validation/test split sizes
-- MAE
-- MAPE
-- R-squared
-- Median error
-- Cross-validation MAE/R-squared
-- Feature importances
-- Point estimate
-- 80% confidence range
-- Closest comparable sales
+---
 
 ## Testing
 
-Install dev dependencies:
-
 ```bash
 pip install -e ".[dev]"
-```
-
-Run tests:
-
-```bash
 pytest
 ```
 
-Most tests mock network calls. Live CLI commands that call Zillow, Census, Nominatim, or Redfin still require network access and may fail if a provider rate limits, changes response format, or blocks automated requests.
+Most tests mock network calls. Live CLI commands that call Census, Nominatim, Zillow, or Redfin still require network access and may fail if a provider changes its response format or rate-limits automated requests.
 
-## Common Troubleshooting
+---
 
-### `housing-estimate` command not found
+## Troubleshooting
 
-Install the package from the repo root:
+**`housing-estimate` not found** — make sure the virtual environment is activated and the package is installed (`pip install -e .`).
 
-```bash
-pip install -e .
-```
+**Zillow lookup blocked** — Zillow returns captcha or rate-limit responses intermittently. Use `--manual` to enter property details directly.
 
-Make sure your virtual environment is activated.
-
-### Typer or Click import error
-
-Upgrade package dependencies:
-
-```bash
-pip install --upgrade -e .
-```
-
-This project declares `click>=8.1` because newer Typer versions depend on modern Click typing behavior.
-
-### Zillow lookup is blocked
-
-Zillow may return captcha or rate-limit responses. Use manual mode:
-
-```bash
-housing-estimate price "ADDRESS" --manual
-housing-estimate local-estimate "ADDRESS" --manual
-```
-
-### Redfin returns no sales
-
-Try a larger radius or longer lookback:
-
+**Redfin returns no sales** — try a larger radius or longer lookback:
 ```bash
 housing-estimate recent-sales "ADDRESS" --radius 3.0 --days 730
 ```
+The local model needs at least 20 usable sales with price and square footage.
 
-For local model training, the code needs at least 20 usable sales with price and square footage.
-
-### Model artifacts missing
-
-Run:
-
-```bash
-housing-estimate train
+**Model artifacts missing** — run `housing-estimate train` or verify these files exist:
 ```
-
-or confirm these files exist:
-
-```text
 data/models/xgb_point.joblib
 data/models/xgb_low.joblib
 data/models/xgb_high.joblib
 data/models/feature_columns.joblib
 ```
 
-## Privacy Notes
+---
 
-The repository intentionally uses a public institutional address for examples and does not include private property reports. If you adapt the project for a real property, avoid committing:
+## Privacy
 
-- Full home addresses
-- Owner names
-- Assessor account IDs
-- MLS screenshots or private listing exports
-- Local PDFs from county records
-- Personal file paths
-- One-off valuation reports for private properties
+The repository uses a public institutional address for all examples and does not include private property reports. If you adapt this for a real property, do not commit:
+
+- Full home addresses or owner names
+- Assessor account IDs or MLS identifiers
+- County records, PDF exports, or private listing data
+- Per-property valuation reports (`reports/` is in `.gitignore`)
+- Absolute filesystem paths referencing personal directories
+
+---
 
 ## Limitations
 
-This is a research and decision-support estimator, not a certified appraisal.
+This is a research and decision-support tool, not a certified appraisal.
 
-Important caveats:
-
-- Automated property details can be missing or stale.
-- Redfin/Zillow endpoints are public web endpoints and can change or block automated access.
-- Assessor data, renovation quality, condition, school zones, lot utility, and micro-location effects may not be captured.
-- Small local training sets can overfit even when test R-squared looks strong.
+- Automated property details (from Zillow, Redfin) can be missing, stale, or incorrect.
+- Web endpoints are public and may change format or block automated access without notice.
+- Condition, renovation quality, school zones, lot utility, views, and micro-location effects are not captured by the features.
+- Small local training sets can overfit even when test R² looks acceptable.
 - Confidence intervals are approximate model ranges, not formal appraisal uncertainty.
-- Final pricing decisions should be checked against verified assessor records, MLS listings, recent pending sales, and a human comp review.
+- Final pricing decisions should be verified against assessor records, MLS listings, recent pending sales, and a human comparable-sales review.
+
+---
+
+## License
+
+MIT

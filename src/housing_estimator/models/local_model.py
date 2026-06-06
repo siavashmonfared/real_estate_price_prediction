@@ -16,7 +16,7 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from xgboost import XGBRegressor
 
 from housing_estimator.datasources.recent_sales import SoldProperty, fetch_recent_sales_redfin
-from housing_estimator.features.property import PropertyFeatures
+from housing_estimator.features.property import Condition, PropertyFeatures
 
 console = Console()
 
@@ -28,11 +28,34 @@ LOCAL_FEATURES = [
     "log_sqft",
     "bedrooms",
     "bathrooms",
-    "age",
+    "effective_age",
     "lot_sqft",
     "distance_miles",
     "price_per_sqft_neighborhood",
 ]
+
+# Transparent, appraiser-style condition adjustment applied to the final
+# estimate. A model feature can't learn condition because comparable sales
+# carry no condition label, so we adjust the prediction directly instead.
+_CONDITION_MULTIPLIER = {
+    Condition.RENOVATED: 1.08,
+    Condition.UPDATED: 1.03,
+    Condition.AVERAGE: 1.00,
+    Condition.DATED: 0.88,
+}
+
+
+def _effective_age(features: PropertyFeatures) -> float:
+    """Effective age of the subject in years.
+
+    Driven only by a *factual* renovation_year (a 2020-renovated home is
+    genuinely newer). Condition quality is handled separately via
+    _CONDITION_MULTIPLIER, not by distorting age. Comparable sales use actual
+    age, so a subject with no renovation_year also uses actual age.
+    """
+    if features.renovation_year:
+        return float(max(0, CURRENT_YEAR - features.renovation_year))
+    return float(max(0, CURRENT_YEAR - features.year_built))
 
 
 @dataclass
@@ -109,7 +132,8 @@ def _engineer_local_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer features for the local model."""
     out = df.copy()
     out["log_sqft"] = np.log1p(out["sqft"])
-    out["age"] = CURRENT_YEAR - out["year_built"].clip(upper=CURRENT_YEAR)
+    # Comparable sales: condition unknown, so effective age == actual age.
+    out["effective_age"] = CURRENT_YEAR - out["year_built"].clip(upper=CURRENT_YEAR)
     out["lot_sqft"] = out["lot_sqft"].fillna(0)
 
     # Neighborhood median price/sqft as a feature for each row
@@ -129,7 +153,7 @@ def _subject_to_row(
         "log_sqft": np.log1p(features.sqft),
         "bedrooms": features.bedrooms,
         "bathrooms": features.bathrooms,
-        "age": max(0, CURRENT_YEAR - features.year_built),
+        "effective_age": _effective_age(features),
         "lot_sqft": features.lot_sqft or 0,
         "distance_miles": 0.0,  # subject is at center
         "price_per_sqft_neighborhood": neighborhood_ppsf,
@@ -269,28 +293,45 @@ def train_and_predict(
     console.print(f"    Validation: {len(X_val)} samples ({len(X_val)/len(X)*100:.0f}%)")
     console.print(f"    Test:       {len(X_test)} samples ({len(X_test)/len(X)*100:.0f}%)")
 
-    # Tune depth based on training sample size
+    # Complexity scaled to sample size, and regularized to curb the
+    # train-R²≈1.0 / low-test-R² overfitting seen on small local datasets.
     n_train = len(X_train)
-    max_depth = 3 if n_train < 50 else 4 if n_train < 150 else 5
-    n_estimators = 100 if n_train < 50 else 200 if n_train < 150 else 300
-
-    console.print(f"\n  [bold]Model Config:[/bold]")
-    console.print(f"    XGBoost: n_estimators={n_estimators}, max_depth={max_depth}, lr=0.08")
-    console.print(f"    Features: {', '.join(LOCAL_FEATURES)}")
-
-    # Train point estimate model
-    model = XGBRegressor(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        learning_rate=0.08,
+    max_depth = 2 if n_train < 50 else 3 if n_train < 150 else 4
+    min_child_weight = max(3, n_train // 30)
+    reg_params = dict(
+        learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
+        min_child_weight=min_child_weight,
+        reg_lambda=2.0,
+        reg_alpha=0.5,
+        gamma=0.5,
         random_state=42,
         n_jobs=-1,
     )
-    model.fit(X_train, y_train)
 
-    # --- Compute metrics on ALL splits ---
+    console.print(f"\n  [bold]Model Config:[/bold]")
+    console.print(
+        f"    XGBoost: max_depth={max_depth}, lr=0.05, min_child_weight={min_child_weight}, "
+        f"reg_lambda=2.0, reg_alpha=0.5, gamma=0.5"
+    )
+    console.print(f"    Features: {', '.join(LOCAL_FEATURES)}")
+
+    # Pick the number of trees by early stopping on the validation split,
+    # so the model stops before it memorizes the training data.
+    model = XGBRegressor(
+        n_estimators=1000,
+        max_depth=max_depth,
+        early_stopping_rounds=25,
+        eval_metric="mae",
+        **reg_params,
+    )
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    best_n = int(getattr(model, "best_iteration", 0) or 0) + 1
+    best_n = max(30, min(best_n, 400))
+    console.print(f"    Early stopping selected n_estimators={best_n}")
+
+    # --- Compute metrics on ALL splits (early-stopped model) ---
     train_metrics = _compute_split_metrics("Train", model, X_train, y_train)
     val_metrics = _compute_split_metrics("Validation", model, X_val, y_val)
     test_metrics = _compute_split_metrics("Test", model, X_test, y_test)
@@ -303,63 +344,65 @@ def train_and_predict(
             f"Median Error: ${m.median_error:>10,.0f}"
         )
 
-    # Cross-validation on training data for additional robustness check
+    # Cross-validation (fixed tree count, no early stopping so eval_set isn't needed)
     n_folds = min(5, max(2, n_train // 10))
-    cv_scores_mae = cross_val_score(model, X_train, y_train, cv=n_folds, scoring="neg_mean_absolute_error")
-    cv_scores_r2 = cross_val_score(model, X_train, y_train, cv=n_folds, scoring="r2")
+    cv_model = XGBRegressor(n_estimators=best_n, max_depth=max_depth, **reg_params)
+    cv_scores_mae = cross_val_score(cv_model, X_train, y_train, cv=n_folds, scoring="neg_mean_absolute_error")
+    cv_scores_r2 = cross_val_score(cv_model, X_train, y_train, cv=n_folds, scoring="r2")
     cv_mae = -cv_scores_mae.mean()
     cv_r2 = cv_scores_r2.mean()
     console.print(f"    {'CV (train)':12s} | MAE: ${cv_mae:>10,.0f} | R²: {cv_r2:>6.3f} ({n_folds}-fold)")
 
-    # --- Retrain on ALL data for final prediction ---
-    console.print(f"\n  [bold]Retraining on all {len(X)} samples for final prediction...[/bold]")
-    model_final = XGBRegressor(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        learning_rate=0.08,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-        n_jobs=-1,
-    )
+    # --- Retrain on ALL data for final prediction (best_n trees) ---
+    console.print(f"\n  [bold]Retraining on all {len(X)} samples ({best_n} trees) for final prediction...[/bold]")
+    model_final = XGBRegressor(n_estimators=best_n, max_depth=max_depth, **reg_params)
     model_final.fit(X, y)
 
     # Quantile models for confidence interval (trained on all data)
     model_low = XGBRegressor(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        learning_rate=0.08,
-        subsample=0.8,
-        random_state=42,
-        objective="reg:quantileerror",
-        quantile_alpha=0.10,
-        n_jobs=-1,
+        n_estimators=best_n, max_depth=max_depth,
+        objective="reg:quantileerror", quantile_alpha=0.10, **reg_params,
     )
     model_low.fit(X, y)
-
     model_high = XGBRegressor(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        learning_rate=0.08,
-        subsample=0.8,
-        random_state=42,
-        objective="reg:quantileerror",
-        quantile_alpha=0.90,
-        n_jobs=-1,
+        n_estimators=best_n, max_depth=max_depth,
+        objective="reg:quantileerror", quantile_alpha=0.90, **reg_params,
     )
     model_high.fit(X, y)
 
     # Predict subject property
     X_subject = _subject_to_row(features, neighborhood_ppsf)
     point = float(model_final.predict(X_subject)[0])
-    low = float(model_low.predict(X_subject)[0])
-    high = float(model_high.predict(X_subject)[0])
+    q_low = float(model_low.predict(X_subject)[0])
+    q_high = float(model_high.predict(X_subject)[0])
 
-    low, high = min(low, high), max(low, high)
-    point = float(np.clip(point, low, high))
+    # Anchor the band AROUND the point estimate. Previously the point was
+    # clipped into [q_low, q_high]; when the quantile models crossed (common
+    # on small data) the band collapsed onto the point. Now the point is kept
+    # as-is and the band is the union of the quantile predictions and a
+    # minimum width derived from real held-out error (val/test MAPE).
+    held_out_mape = max(
+        (m.mape for m in (val_metrics, test_metrics) if m is not None),
+        default=0.15,
+    )
+    held_out_mape = float(min(max(held_out_mape, 0.05), 0.40))
+    low = min(q_low, q_high, point * (1 - held_out_mape))
+    high = max(q_low, q_high, point * (1 + held_out_mape))
+
+    # Transparent condition adjustment (shifts the whole distribution).
+    cond_mult = _CONDITION_MULTIPLIER.get(features.condition, 1.0)
+    if cond_mult != 1.0:
+        console.print(
+            f"\n  [bold]Condition adjustment:[/bold] {features.condition.value} "
+            f"× {cond_mult:.2f}"
+        )
+    point *= cond_mult
+    low *= cond_mult
+    high *= cond_mult
+
     low = max(low, 10_000)
     point = max(point, 10_000)
-    high = max(high, point)
+    high = max(high, point * 1.01)
 
     # Feature importance from final model
     importances = dict(zip(LOCAL_FEATURES, model_final.feature_importances_))

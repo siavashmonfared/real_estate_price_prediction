@@ -16,6 +16,21 @@ class PropertyType(str, Enum):
     OTHER = "other"
 
 
+class Condition(str, Enum):
+    """Subjective property condition, mapped to an effective age in the model.
+
+    Comparable sales have unknown condition and are treated as AVERAGE
+    (effective age == actual age). Setting the subject to a better/worse
+    condition shifts its effective age so a renovated old home prices closer
+    to a newer one — the appraiser's "effective age" concept.
+    """
+
+    RENOVATED = "renovated"   # recently gut/renovated; reads much newer
+    UPDATED = "updated"       # partially updated, good shape
+    AVERAGE = "average"       # typical for its age (default)
+    DATED = "dated"           # original/needs work; reads older
+
+
 class PropertyFeatures(BaseModel):
     """Core property attributes used for estimation."""
 
@@ -24,6 +39,8 @@ class PropertyFeatures(BaseModel):
     sqft: float = Field(gt=0)
     lot_sqft: Optional[float] = Field(default=None, ge=0)
     year_built: int = Field(ge=1800, le=2030)
+    renovation_year: Optional[int] = Field(default=None, ge=1800, le=2030)
+    condition: Condition = Condition.AVERAGE
     stories: Optional[float] = Field(default=None, ge=1, le=5)
     property_type: PropertyType = PropertyType.SINGLE_FAMILY
 

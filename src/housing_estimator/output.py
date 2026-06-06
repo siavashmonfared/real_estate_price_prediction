@@ -10,7 +10,7 @@ from rich.text import Text
 
 from housing_estimator.datasources.recent_sales import SoldProperty
 from housing_estimator.estimator import EstimateResult
-from housing_estimator.models.local_model import LocalEstimate
+from housing_estimator.models.local_model import CURRENT_YEAR, LocalEstimate, _effective_age
 
 console = Console()
 
@@ -370,6 +370,19 @@ def render_local_estimate(
     ctx_table.add_row("Neighborhood median price", f"${estimate.median_price:,.0f}")
     ctx_table.add_row("Neighborhood median $/sqft", f"${estimate.median_ppsf:,.0f}")
     ctx_table.add_row("Implied $/sqft for subject", f"${estimate.point_estimate / features.sqft:,.0f}")
+
+    # Condition / effective age context (subject-specific, no hardcoded values)
+    cond = getattr(features, "condition", None)
+    if cond is not None:
+        actual_age = max(0, CURRENT_YEAR - features.year_built)
+        if getattr(features, "renovation_year", None):
+            eff_age = max(0, CURRENT_YEAR - features.renovation_year)
+            cond_label = f"renovated {features.renovation_year}"
+        else:
+            eff_age = _effective_age(features)
+            cond_label = cond.value
+        ctx_table.add_row("Condition (model input)", cond_label)
+        ctx_table.add_row("Actual / effective age", f"{actual_age} yr / {eff_age:.0f} yr")
     console.print(ctx_table)
 
     # === SECTION 6: Closest Comparable Sales ===

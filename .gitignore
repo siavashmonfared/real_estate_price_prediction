@@ -33,3 +33,15 @@ data/raw/redfin_zip_raw.tsv.gz
 data/raw/redfin_zip_market_data.csv
 data/raw/fhfa_hpi.csv
 data/raw/fhfa_hpi_zip5.xlsx
+
+# Per-property reports (contain private addresses and personal data)
+reports/*.pdf
+reports/*.tex
+reports/*.aux
+reports/*.log
+reports/*.out
+reports/*.csv
+reports/*.md
+
+# Claude Code settings
+.claude/
